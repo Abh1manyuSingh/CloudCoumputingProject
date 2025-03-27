@@ -1,5 +1,4 @@
-// internal/raft/fsm.go
-package raftnode
+package raft
 
 import (
 	"encoding/json"
@@ -12,149 +11,155 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-type CommandType string
-
+// Command type constants
 const (
-	AddPrinter     CommandType = "add_printer"
-	AddFilament    CommandType = "add_filament"
-	AddPrintJob    CommandType = "add_print_job"
-	UpdatePrintJob CommandType = "update_print_job"
+	AddPrinter  = "ADD_PRINTER"
+	AddFilament = "ADD_FILAMENT"
+	AddPrintJob = "ADD_PRINT_JOB"
 )
 
+// Command represents a Raft log command
 type Command struct {
-	Type    CommandType `json:"type"`
-	Payload []byte      `json:"payload"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
 }
 
-type RaftFSM struct {
+// RaftStore implements raft.FSM (Finite State Machine)
+type RaftStore struct {
 	mu        sync.RWMutex
 	printers  map[string]*models.Printer
 	filaments map[string]*models.Filament
 	printJobs map[string]*models.PrintJob
 }
 
-func NewRaftFSM() *RaftFSM {
-	return &RaftFSM{
+// NewRaftStore initializes a new RaftStore.
+func NewRaftStore() *RaftStore {
+	return &RaftStore{
 		printers:  make(map[string]*models.Printer),
 		filaments: make(map[string]*models.Filament),
 		printJobs: make(map[string]*models.PrintJob),
 	}
 }
 
-func (f *RaftFSM) Apply(log *raft.Log) interface{} {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
+// Apply applies a Raft log entry to the FSM.
+func (s *RaftStore) Apply(log *raft.Log) interface{} {
 	var cmd Command
 	if err := json.Unmarshal(log.Data, &cmd); err != nil {
-		return fmt.Errorf("failed to unmarshal command: %v", err)
+		fmt.Println("Failed to unmarshal command:", err)
+		return nil
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	switch cmd.Type {
 	case AddPrinter:
 		var printer models.Printer
 		if err := json.Unmarshal(cmd.Payload, &printer); err != nil {
-			return err
+			fmt.Println("Failed to unmarshal printer:", err)
+			return nil
 		}
-		f.printers[printer.ID] = &printer
+		s.printers[printer.ID] = &printer
+
 	case AddFilament:
 		var filament models.Filament
 		if err := json.Unmarshal(cmd.Payload, &filament); err != nil {
-			return err
+			fmt.Println("Failed to unmarshal filament:", err)
+			return nil
 		}
-		f.filaments[filament.ID] = &filament
+		s.filaments[filament.ID] = &filament
+
 	case AddPrintJob:
-		var printJob models.PrintJob
-		if err := json.Unmarshal(cmd.Payload, &printJob); err != nil {
-			return err
+		var job models.PrintJob
+		if err := json.Unmarshal(cmd.Payload, &job); err != nil {
+			fmt.Println("Failed to unmarshal print job:", err)
+			return nil
 		}
-		f.printJobs[printJob.ID] = &printJob
-	case UpdatePrintJob:
-		var printJob models.PrintJob
-		if err := json.Unmarshal(cmd.Payload, &printJob); err != nil {
-			return err
-		}
-		f.printJobs[printJob.ID] = &printJob
-	default:
-		return fmt.Errorf("unknown command type: %s", cmd.Type)
+		s.printJobs[job.ID] = &job
 	}
 
 	return nil
 }
 
-func (f *RaftFSM) Snapshot() (raft.FSMSnapshot, error) {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
+// Snapshot creates a snapshot of the current state.
+func (s *RaftStore) Snapshot() (raft.FSMSnapshot, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	return &FSMSnapshot{
-		printers:  f.printers,
-		filaments: f.filaments,
-		printJobs: f.printJobs,
-	}, nil
-}
-
-func (f *RaftFSM) Restore(rc io.ReadCloser) error {
-	defer rc.Close()
-
-	var snapshot struct {
-		Printers  map[string]*models.Printer  `json:"printers"`
-		Filaments map[string]*models.Filament `json:"filaments"`
-		PrintJobs map[string]*models.PrintJob `json:"print_jobs"`
-	}
-
-	if err := json.NewDecoder(rc).Decode(&snapshot); err != nil {
-		return err
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.printers = snapshot.Printers
-	f.filaments = snapshot.Filaments
-	f.printJobs = snapshot.PrintJobs
-
-	return nil
-}
-
-type FSMSnapshot struct {
-	printers  map[string]*models.Printer
-	filaments map[string]*models.Filament
-	printJobs map[string]*models.PrintJob
-}
-
-func (s *FSMSnapshot) Persist(sink raft.SnapshotSink) error {
-	err := func() error {
-		// Create a snapshot payload
-		snapshot := struct {
-			Printers  map[string]*models.Printer  `json:"printers"`
-			Filaments map[string]*models.Filament `json:"filaments"`
-			PrintJobs map[string]*models.PrintJob `json:"print_jobs"`
-		}{
-			Printers:  s.printers,
-			Filaments: s.filaments,
-			PrintJobs: s.printJobs,
-		}
-
-		// Convert snapshot to JSON
-		buf, err := json.Marshal(snapshot)
-		if err != nil {
-			return err
-		}
-
-		// Write to sink
-		if _, err := sink.Write(buf); err != nil {
-			return err
-		}
-
-		return sink.Close()
-	}()
-
+	data, err := json.Marshal(s)
 	if err != nil {
-		sink.Cancel()
+		return nil, err
+	}
+
+	return &snapshot{data: data}, nil
+}
+
+// Restore restores state from a snapshot.
+func (s *RaftStore) Restore(rc io.ReadCloser) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var store RaftStore
+	if err := json.NewDecoder(rc).Decode(&store); err != nil {
 		return err
 	}
 
+	s.printers = store.printers
+	s.filaments = store.filaments
+	s.printJobs = store.printJobs
 	return nil
 }
 
-func (s *FSMSnapshot) Release() {}
+// Snapshot structure
+type snapshot struct {
+	data []byte
+}
+
+// Persist writes snapshot data.
+func (s *snapshot) Persist(sink raft.SnapshotSink) error {
+	_, err := sink.Write(s.data)
+	if err != nil {
+		_ = sink.Cancel()
+		return err
+	}
+	return sink.Close()
+}
+
+// Release releases the snapshot.
+func (s *snapshot) Release() {}
+
+// GetPrinters returns all printers.
+func (s *RaftStore) GetPrinters() []*models.Printer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var printers []*models.Printer
+	for _, p := range s.printers {
+		printers = append(printers, p)
+	}
+	return printers
+}
+
+// GetFilaments returns all filaments.
+func (s *RaftStore) GetFilaments() []*models.Filament {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var filaments []*models.Filament
+	for _, f := range s.filaments {
+		filaments = append(filaments, f)
+	}
+	return filaments
+}
+
+// GetPrintJobs returns all print jobs.
+func (s *RaftStore) GetPrintJobs() []*models.PrintJob {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var jobs []*models.PrintJob
+	for _, j := range s.printJobs {
+		jobs = append(jobs, j)
+	}
+	return jobs
+}

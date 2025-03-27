@@ -6,7 +6,7 @@ import (
 	"net/http"
 
 	"practics/internal/api"
-	"practics/internal/raftnode" // Updated Import
+	raftnode "practics/internal/raft" // Updated Import
 )
 
 func main() {

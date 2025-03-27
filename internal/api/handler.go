@@ -11,7 +11,8 @@ import (
 	"github.com/hashicorp/raft"
 
 	"practics/internal/models"
-	raftnode "practics/internal/raft" // Rename the import alias
+	//"practics/internal/raft" // Rename the import alias
+	raftnode "practics/internal/raft" // Keep alias if needed
 )
 
 type Handlers struct {
